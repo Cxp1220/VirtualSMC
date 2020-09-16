@@ -56,11 +56,17 @@ public:
 	 *  Battery status obtained from ACPI _BST
 	 */
 	enum {
-		BSTFullyCharged = 0,
+		/**
+		 Means that the battery is not charging and not discharging.
+		 It may happen when the battery is fully charged,
+		 or when AC adapter is connected but charging has not started yet,
+		 or when charging is limited to some percent in BIOS settings.
+		 */
+		BSTNotCharging  = 0,
 		BSTDischarging  = 1 << 0,
 		BSTCharging     = 1 << 1,
 		BSTCritical     = 1 << 2,
-		BSTStateMask    = BSTFullyCharged | BSTDischarging | BSTCharging,
+		BSTStateMask    = BSTNotCharging | BSTDischarging | BSTCharging,
 	};
 
 	/**
@@ -111,6 +117,16 @@ public:
 	 */
 	uint16_t calculateBatteryStatus();
 
+	/**
+	 *  Supplement info config
+	 */
+	int32_t supplementConfig {-1};
+
+	/**
+	 *  QuickPoll will be disable when average rate is available from EC
+	 */
+	bool averageRateAvailable {false};
+
 private:
 	uint32_t getNumberFromArray(OSArray *array, uint32_t index);
 
@@ -143,6 +159,8 @@ private:
 	static constexpr const char *AcpiBatteryInformation   = "_BIF";
 	static constexpr const char *AcpiBatteryInformationEx = "_BIX";
 	static constexpr const char *AcpiBatteryStatus        = "_BST";
+	static constexpr const char *AcpiBatteryInfoSup       = "CBIS";
+	static constexpr const char *AcpiBatteryStatusSup     = "CBSS";
 
 	/**
 	 *  Battery Static Information pack layout
@@ -197,6 +215,37 @@ private:
 		BSTPresentRate,
 		BSTRemainingCapacity,
 		BSTPresentVoltage
+	};
+
+	/**
+	 *  Maximum size of single supplement pack, minus 1 for the status pack
+	 */
+	static constexpr uint8_t BISPackSize = 0x10;
+
+	/**
+	 *  Battery Information Supplement pack layout
+	 */
+	enum {
+		BISConfig,
+		BISManufactureDate,
+		BISPackLotCode,
+		BISPCBLotCode,
+		BISFirmwareVersion,
+		BISHardwareVersion,
+		BISBatteryVersion
+	};
+
+	/**
+	 *  Battery Status Supplement pack layout
+	 */
+	enum {
+		BSSTemperature = BISPackSize,
+		BSSTimeToFull,
+		BSSTimeToEmpty,
+		BSSChargeLevel,
+		BSSAverageRate,
+		BSSChargingCurrent,
+		BSSChargingVoltage
 	};
 };
 

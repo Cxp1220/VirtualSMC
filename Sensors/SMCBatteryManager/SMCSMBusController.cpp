@@ -7,12 +7,16 @@
 
 #include <Headers/kern_compat.hpp>
 #include <Headers/kern_api.hpp>
+#include <Headers/kern_atomic.hpp>
+#include <Headers/kern_time.hpp>
 
 #include <libkern/c++/OSContainers.h>
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IOTimerEventSource.h>
 
 #include "SMCSMBusController.hpp"
+
+extern _Atomic(bool) smc_battery_manager_started;
 
 OSDefineMetaClassAndStructors(SMCSMBusController, IOSMBusController)
 
@@ -26,16 +30,28 @@ bool SMCSMBusController::init(OSDictionary *properties) {
 }
 
 IOService *SMCSMBusController::probe(IOService *provider, SInt32 *score) {
-	if (!IOSMBusController::probe(provider, score))
+	if (!IOSMBusController::probe(provider, score)) {
+		SYSLOG("smcbus", "parent probe failure");
 		return nullptr;
+	}
 
-	if (!BatteryManager::getShared()->probe())
+	if (!BatteryManager::getShared()->probe()) {
+		SYSLOG("smcbus", "BatteryManager probe failure");
 		return nullptr;
+	}
 
 	return this;
 }
 
 bool SMCSMBusController::start(IOService *provider) {
+	
+	if (!smc_battery_manager_started) {
+		DBGLOG("smcbus", "SMCBatteryManager is not available now, will check during next start attempt");
+		return false;
+	}
+	
+	DBGLOG("smcbus", "SMCBatteryManager is available, start SMCSMBusController");
+	
 	workLoop = IOWorkLoop::workLoop();
 	if (!workLoop) {
 		SYSLOG("smcbus", "createWorkLoop allocation failed");
@@ -167,14 +183,14 @@ IOSMBusStatus SMCSMBusController::startRequest(IOSMBusRequest *request) {
 				}
 				case kBPackReserveCmd:
 				case kBDesignCycleCount9CCmd: {
-					setReceiveData(transaction, 100);
+					setReceiveData(transaction, 1000);
 					break;
 				}
 				case kBReadCellVoltage1Cmd:
 				case kBReadCellVoltage2Cmd:
 				case kBReadCellVoltage3Cmd:
 				case kBReadCellVoltage4Cmd: {
-					setReceiveData(transaction, 1);
+					setReceiveData(transaction, defaultBatteryCellVoltage);
 					break;
 				}
 				case kBCurrentCmd: {
@@ -215,8 +231,13 @@ IOSMBusStatus SMCSMBusController::startRequest(IOSMBusRequest *request) {
 					setReceiveData(transaction, value);
 					break;
 				}
-				case kBTemperatureCmd:
+				case kBTemperatureCmd: {
+					IOSimpleLockLock(BatteryManager::getShared()->stateLock);
+					auto value = BatteryManager::getShared()->state.btInfo[0].state.temperatureRaw;
+					IOSimpleLockUnlock(BatteryManager::getShared()->stateLock);
+					setReceiveData(transaction, value);
 					break;
+				}
 				case kBDesignCapacityCmd: {
 					IOSimpleLockLock(BatteryManager::getShared()->stateLock);
 					auto value = BatteryManager::getShared()->state.btInfo[0].designCapacity;
@@ -253,32 +274,40 @@ IOSMBusStatus SMCSMBusController::startRequest(IOSMBusRequest *request) {
 					break;
 				}
 				case kBManufactureDateCmd: {
+					uint16_t value = 0;
 					IOSimpleLockLock(BatteryManager::getShared()->stateLock);
-					lilu_os_strncpy(reinterpret_cast<char *>(transaction->receiveData), BatteryManager::getShared()->state.btInfo[0].serial, kSMBusMaximumDataSize);
-					transaction->receiveData[kSMBusMaximumDataSize-1] = '\0';
+					if (BatteryManager::getShared()->state.btInfo[0].manufactureDate) {
+						value = BatteryManager::getShared()->state.btInfo[0].manufactureDate;
+					} else {
+						lilu_os_strncpy(reinterpret_cast<char *>(transaction->receiveData), BatteryManager::getShared()->state.btInfo[0].serial, kSMBusMaximumDataSize);
+						transaction->receiveData[kSMBusMaximumDataSize-1] = '\0';
+					}
 					IOSimpleLockUnlock(BatteryManager::getShared()->stateLock);
 
-					const char* p = reinterpret_cast<char *>(transaction->receiveData);
-					bool found = false;
-					int year = 2016, month = 02, day = 29;
-					while ((p = strstr(p, "20")) != nullptr) { // hope that this code will not survive until 22nd century
-						if (sscanf(p, "%04d%02d%02d", &year, &month, &day) == 3 || 		// YYYYMMDD (Lenovo)
-							sscanf(p, "%04d/%02d/%02d", &year, &month, &day) == 3) {	// YYYY/MM/DD (HP)
-							if (1 <= month && month <= 12 && 1 <= day && day <= 31) {
-								found = true;
-								break;
+					if (!value) {
+						const char* p = reinterpret_cast<char *>(transaction->receiveData);
+						bool found = false;
+						int year = 2016, month = 02, day = 29;
+						while ((p = strstr(p, "20")) != nullptr) { // hope that this code will not survive until 22nd century
+							if (sscanf(p, "%04d%02d%02d", &year, &month, &day) == 3 || 		// YYYYMMDD (Lenovo)
+								sscanf(p, "%04d/%02d/%02d", &year, &month, &day) == 3) {	// YYYY/MM/DD (HP)
+								if (1 <= month && month <= 12 && 1 <= day && day <= 31) {
+									found = true;
+									break;
+								}
 							}
+							p++;
 						}
-						p++;
+						
+						if (!found) { // in case we parsed a non-date
+							year = 2016;
+							month = 02;
+							day = 29;
+						}
+						value = makeBatteryDate(day, month, year);
 					}
 					
-					if (!found) { // in case we parsed a non-date
-						year = 2016;
-						month = 02;
-						day = 29;
-					}
-					
-					setReceiveData(transaction, makeBatteryDate(day, month, year));
+					setReceiveData(transaction, value);
 					break;
 				}
 				//CHECKME: Should there be a default setting receiveDataCount to 0 or status failure?
@@ -321,32 +350,27 @@ IOSMBusStatus SMCSMBusController::startRequest(IOSMBusRequest *request) {
 					IOSimpleLockUnlock(BatteryManager::getShared()->stateLock);
 					break;
 				case kBManufacturerDataCmd:
+					transaction->receiveDataCount = sizeof(BatteryInfo::BatteryManufacturerData);
+					IOSimpleLockLock(BatteryManager::getShared()->stateLock);
+					lilu_os_memcpy(reinterpret_cast<uint16_t *>(transaction->receiveData), &BatteryManager::getShared()->state.btInfo[0].batteryManufacturerData, sizeof(BatteryInfo::BatteryManufacturerData));
+					IOSimpleLockUnlock(BatteryManager::getShared()->stateLock);
+					break;
 				case kBManufacturerInfoCmd:
-					// Don't put strings here, these are numeric values.
-					//FIXME: One of these commands should return a struct of such layout:
-					/*
-					struct BatteryInfo {
-						uint16_t PackLotCode;
-						uint16_t PCBLotCode;
-						uint16_t FirmwareVersion;
-						uint16_t HardwareVersion;
-						uint16_t BatteryVersion;
-					};
-					 */
-					// All fields are big endian.
-					// But we can't get such values from ACPI, so we should at least fake it.
-					// Now we are faking them by leaving them as 0, it is seen in System Profiler.
 					break;
 				// Let other commands slip if any.
 				// receiveDataCount is already 0, and status failure results in retries - it's not what we want.
 			}
 		}
 	}
-	
+
 	if (!requestQueue->setObject(request)) {
 		SYSLOG("smcbus", "startRequest failed to append a request");
 		return kIOSMBusStatusUnknownFailure;
 	}
+
+	IOSimpleLockLock(BatteryManager::getShared()->stateLock);
+	BatteryManager::getShared()->lastAccess = getCurrentTimeNs();
+	IOSimpleLockUnlock(BatteryManager::getShared()->stateLock);
 
 	return result;
 }
@@ -377,17 +401,12 @@ IOReturn SMCSMBusController::handleACPINotification(void *target) {
 		IOSimpleLockLock(bmgr.stateLock);
 		bool batteriesConnected = bmgr.batteriesConnected();
 		bool adaptersConnected = bmgr.adaptersConnected();
-		if (batteriesConnected != self->prevBatteriesConnected || adaptersConnected != self->prevAdaptersConnected) {
-			self->prevBatteriesConnected = batteriesConnected;
-			self->prevAdaptersConnected = adaptersConnected;
-			IOSimpleLockUnlock(bmgr.stateLock);
-			uint8_t data[] = {kBMessageStatusCmd, batteriesConnected};
-			DBGLOG("smcbus", "sending kBMessageStatusCmd with data %x", data[1]);
-			self->messageClients(kIOMessageSMBusAlarm, data, arrsize(data));
-		}
-		else {
-			IOSimpleLockUnlock(bmgr.stateLock);
-		}
+		self->prevBatteriesConnected = batteriesConnected;
+		self->prevAdaptersConnected = adaptersConnected;
+		IOSimpleLockUnlock(bmgr.stateLock);
+		uint8_t data[] = {kBMessageStatusCmd, batteriesConnected};
+		DBGLOG("smcbus", "sending kBMessageStatusCmd with data %x", data[1]);
+		self->messageClients(kIOMessageSMBusAlarm, data, arrsize(data));
 		return kIOReturnSuccess;
 	}
 	return kIOReturnBadArgument;
@@ -396,11 +415,13 @@ IOReturn SMCSMBusController::handleACPINotification(void *target) {
 IOReturn SMCSMBusController::setPowerState(unsigned long state, IOService *device) {
 	if (state) {
 		DBGLOG("smcbus", "%s we are waking up", safeString(device->getName()));
-		atomic_store_explicit(&BatteryManager::getShared()->quickPoll, ACPIBattery::QuickPollCount, memory_order_release);
+		if (!BatteryManager::getShared()->quickPollDisabled)
+			atomic_store_explicit(&BatteryManager::getShared()->quickPoll, ACPIBattery::QuickPollCount, memory_order_release);
 		BatteryManager::getShared()->wake();
 	} else {
 		DBGLOG("smcbus", "%s we are sleeping", safeString(device->getName()));
 		atomic_store_explicit(&BatteryManager::getShared()->quickPoll, 0, memory_order_release);
+		BatteryManager::getShared()->sleep();
 	}
 	return kIOPMAckImplied;
 }

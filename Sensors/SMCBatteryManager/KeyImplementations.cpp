@@ -179,14 +179,33 @@ SMC_RESULT BRSC::readAccess() {
 	// TODO: what's with multiple batteries?
 	data[0] = 0;
 	IOSimpleLockLock(BatteryManager::getShared()->stateLock);
-	if (BatteryManager::getShared()->batteriesCount > 0 &&
-		BatteryManager::getShared()->state.btInfo[0].connected &&
-		BatteryManager::getShared()->state.btInfo[0].state.lastFullChargeCapacity > 0 &&
+	if (!BatteryManager::getShared()->batteriesCount ||
+		!BatteryManager::getShared()->state.btInfo[0].connected)
+		data[1] = 0;
+	else if (BatteryManager::getShared()->state.btInfo[0].state.chargeLevel)
+		data[1] = BatteryManager::getShared()->state.btInfo[0].state.chargeLevel;
+	else if (BatteryManager::getShared()->state.btInfo[0].state.lastFullChargeCapacity > 0 &&
 		BatteryManager::getShared()->state.btInfo[0].state.lastFullChargeCapacity != BatteryInfo::ValueUnknown &&
 		BatteryManager::getShared()->state.btInfo[0].state.lastFullChargeCapacity <= BatteryInfo::ValueMax)
 		data[1] = BatteryManager::getShared()->state.btInfo[0].state.remainingCapacity * 100 / BatteryManager::getShared()->state.btInfo[0].state.lastFullChargeCapacity;
 	else
 		data[1] = 0;
+	IOSimpleLockUnlock(BatteryManager::getShared()->stateLock);
+	return SmcSuccess;
+}
+
+SMC_RESULT CHBI::readAccess() {
+	uint16_t *ptr = reinterpret_cast<uint16_t *>(data);
+	IOSimpleLockLock(BatteryManager::getShared()->stateLock);
+	*ptr = OSSwapHostToBigInt16(BatteryManager::getShared()->state.btInfo[0].state.chargingCurrent);
+	IOSimpleLockUnlock(BatteryManager::getShared()->stateLock);
+	return SmcSuccess;
+}
+
+SMC_RESULT CHBV::readAccess() {
+	uint16_t *ptr = reinterpret_cast<uint16_t *>(data);
+	IOSimpleLockLock(BatteryManager::getShared()->stateLock);
+	*ptr = OSSwapHostToBigInt16(BatteryManager::getShared()->state.btInfo[0].state.chargingVoltage);
 	IOSimpleLockUnlock(BatteryManager::getShared()->stateLock);
 	return SmcSuccess;
 }
@@ -206,6 +225,14 @@ SMC_RESULT CHLC::readAccess() {
 		data[0] = 2;
 	else
 		data[0] = 1;
+	IOSimpleLockUnlock(BatteryManager::getShared()->stateLock);
+	return SmcSuccess;
+}
+
+SMC_RESULT TB0T::readAccess() {
+	uint16_t *ptr = reinterpret_cast<uint16_t *>(data);
+	IOSimpleLockLock(BatteryManager::getShared()->stateLock);
+	*ptr = VirtualSMCAPI::encodeSp(SmcKeyTypeSp78, BatteryManager::getShared()->state.btInfo[index].state.temperature);
 	IOSimpleLockUnlock(BatteryManager::getShared()->stateLock);
 	return SmcSuccess;
 }

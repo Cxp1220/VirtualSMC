@@ -22,6 +22,8 @@
 OSDefineMetaClassAndStructors(VirtualSMC, IOACPIPlatformDevice)
 
 VirtualSMC *VirtualSMC::instance;
+_Atomic(bool) VirtualSMC::mmioReady;
+_Atomic(bool) VirtualSMC::servicingReady;
 
 IOService *VirtualSMC::probe(IOService *provider, SInt32 *score) {
 	auto service = IOService::probe(provider, score);
@@ -146,13 +148,22 @@ bool VirtualSMC::start(IOService *provider) {
 		PANIC("vsmc", "failed to reserve interrupt slots");
 	}
 
-	// Service initialisation is delayed to allow trap hook to be initialised
+	// Service initialisation may be delayed to allow trap hook to be initialised
 	instance = this;
 
-	// Register here if we are in legacy mode though
-	if (deviceInfo.getGeneration() == SMCInfo::Generation::V1) {
-		doRegisterService();
-		// Retain ourselves to avoid crashes if lilu is missing
+	// Report servicing as now ready.
+	atomic_store_explicit(&servicingReady, true, memory_order_release);
+
+	// For first generation the initialisation is handled entirely in a private manner.
+	// For second generation perform initialisation when MMIO landed earlier and requested
+	// servicing to perform the initialisation.
+	bool shouldServicingInit = deviceInfo.getGeneration() == SMCInfo::Generation::V1 ||
+		atomic_load_explicit(&mmioReady, memory_order_acquire);
+
+	if (shouldServicingInit) {
+		registerService();
+		publishResource(VirtualSMCAPI::SubmitPlugin);
+		// Retain ourselves to avoid crashes if lilu is missing (only valid for first gen).
 		ADDPR(startSuccess) = true;
 	}
 
@@ -297,7 +308,7 @@ bool VirtualSMC::obtainModelInfo(SMCInfo &deviceInfo, const char *boardIdentifie
 	}
 
 	// Check forced and V1 prior to checking V3, as it may be default
-	const char *generic = "GenericV2";;
+	const char *generic = "GenericV2";
 	if (gen != SMCInfo::Generation::Unspecified) {
 		if (gen == SMCInfo::Generation::V1)
 			generic = "GenericV1";
@@ -308,6 +319,9 @@ bool VirtualSMC::obtainModelInfo(SMCInfo &deviceInfo, const char *boardIdentifie
 	} else if (deviceInfo.getGeneration() == SMCInfo::Generation::V3) {
 		generic = "GenericV3";
 	}
+
+	DBGLOG("vsmc", "gen %d (%d) board %s - %s", gen, deviceInfo.getGeneration(),
+		   boardIdentifier, generic);
 
 	doObtain(generic, true);
 	doObtain(generic, false);

@@ -32,12 +32,10 @@ bool VirtualSMCAPI::postInterrupt(SMC_EVENT_CODE code, const void *data, uint32_
 }
 
 bool VirtualSMCAPI::getDeviceInfo(SMCInfo &info) {
-	auto kstore = VirtualSMC::getKeystore();
-	if (kstore) {
-		info = kstore->getDeviceInfo();
-		return true;
-	}
-	return false;
+	if (!VirtualSMC::isServicingReady())
+		return false;
+	info = VirtualSMC::getKeystore()->getDeviceInfo();
+	return true;
 }
 
 bool VirtualSMCAPI::addKey(SMC_KEY key, VirtualSMCAPI::KeyStorage &data, VirtualSMCValue *val) {
@@ -181,5 +179,39 @@ uint16_t VirtualSMCAPI::encodeFp(uint32_t type, double value) {
 	if (integral == 0)
 		return 0;
 	uint16_t ret = static_cast<uint16_t>(__builtin_fabs(value) * getBit<uint16_t>(16 - integral));
+	return OSSwapInt16(ret);
+}
+
+int16_t VirtualSMCAPI::decodeIntSp(uint32_t type, uint16_t value) {
+	uint32_t integral = getSpIntegral(type);
+	if (integral == 0)
+		return 0;
+	value = OSSwapInt16(value);
+	int16_t ret = (value & 0x7FFF) >> (15U - integral);
+	return (value & 0x8000) ? -ret : ret;
+}
+
+uint16_t VirtualSMCAPI::encodeIntSp(uint32_t type, int16_t value) {
+	uint32_t integral = getSpIntegral(type);
+	if (integral == 0)
+		return 0;
+	uint16_t ret = static_cast<uint16_t>(__builtin_abs(value) << (15U - integral)) & 0x7FFF;
+	return OSSwapInt16(value < 0 ? (ret | 0x8000) : ret);
+}
+
+uint16_t VirtualSMCAPI::decodeIntFp(uint32_t type, uint16_t value) {
+	uint32_t integral = getFpIntegral(type);
+	if (integral == 0)
+		return 0;
+	value = OSSwapInt16(value);
+	int16_t ret = value >> (16U - integral);
+	return ret;
+}
+
+uint16_t VirtualSMCAPI::encodeIntFp(uint32_t type, uint16_t value) {
+	uint32_t integral = getFpIntegral(type);
+	if (integral == 0)
+		return 0;
+	uint16_t ret = static_cast<uint16_t>(value << (16U - integral));
 	return OSSwapInt16(ret);
 }

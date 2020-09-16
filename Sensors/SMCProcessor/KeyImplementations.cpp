@@ -11,7 +11,7 @@
 SMC_RESULT TempPackage::readAccess() {
 	uint16_t *ptr = reinterpret_cast<uint16_t *>(data);
 	IOSimpleLockLock(cp->counterLock);
-	*ptr = VirtualSMCAPI::encodeSp(type, cp->counters.tjmax[package] - cp->counters.thermalStatusPackage[package]);
+	*ptr = VirtualSMCAPI::encodeIntSp(type, cp->counters.tjmax[package] - cp->counters.thermalStatusPackage[package]);
 	cp->quickReschedule();
 	IOSimpleLockUnlock(cp->counterLock);
 	return SmcSuccess;
@@ -20,7 +20,7 @@ SMC_RESULT TempPackage::readAccess() {
 SMC_RESULT TempCore::readAccess() {
 	uint16_t *ptr = reinterpret_cast<uint16_t *>(data);
 	IOSimpleLockLock(cp->counterLock);
-	*ptr = VirtualSMCAPI::encodeSp(type, cp->counters.tjmax[package] - cp->counters.thermalStatus[core]);
+	*ptr = VirtualSMCAPI::encodeIntSp(type, cp->counters.tjmax[package] - cp->counters.thermalStatus[core]);
 	cp->quickReschedule();
 	IOSimpleLockUnlock(cp->counterLock);
 	return SmcSuccess;

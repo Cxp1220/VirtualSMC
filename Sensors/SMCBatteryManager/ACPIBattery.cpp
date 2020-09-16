@@ -83,6 +83,83 @@ bool ACPIBattery::getBatteryInfo(BatteryInfo &bi, bool extended) {
 
 	info->release();
 
+	if (supplementConfig < 0) {
+		OSObject *supplement = nullptr;
+		uint32_t res;
+		supplementConfig = 0;
+		if (device->evaluateObject(AcpiBatteryInfoSup, &supplement) != kIOReturnSuccess) {
+			DBGLOG("acpib", "supplement info not available");
+		} else {
+			OSArray *extra = OSDynamicCast(OSArray, supplement);
+			if (extra) {
+				res = getNumberFromArray(extra, BISConfig);
+				if (res != BatteryInfo::ValueUnknown)
+					supplementConfig = res;
+				if (supplementConfig > 0) {
+					if (supplementConfig & (1U << BISManufactureDate)) {
+						res = getNumberFromArray(extra, BISManufactureDate);
+						if (res < (((2100U - 1980U) & 0x7FU) << 9U)) {
+							bi.manufactureDate = res;
+						} else {
+							SYSLOG("acpib", "invalid supplement info for ManufactureDate (%x)", res);
+							supplementConfig &= ~(1U << BISManufactureDate);
+						}
+					}
+					if (supplementConfig & (1U << BISPackLotCode)) {
+						res = getNumberFromArray(extra, BISPackLotCode);
+						if (res < UINT16_MAX) {
+							bi.batteryManufacturerData.PackLotCode = OSSwapHostToBigInt16(res);
+						} else {
+							SYSLOG("acpib", "invalid supplement info for PackLotCode (%x)", res);
+							supplementConfig &= ~(1U << BISPackLotCode);
+						}
+					}
+					if (supplementConfig & (1U << BISPCBLotCode)) {
+						res = getNumberFromArray(extra, BISPCBLotCode);
+						if (res < UINT16_MAX) {
+							bi.batteryManufacturerData.PCBLotCode = OSSwapHostToBigInt16(res);
+						} else {
+							SYSLOG("acpib", "invalid supplement info for PCBLotCode (%x)", res);
+							supplementConfig &= ~(1U << BISPCBLotCode);
+						}
+					}
+					if (supplementConfig & (1U << BISFirmwareVersion)) {
+						res = getNumberFromArray(extra, BISFirmwareVersion);
+						if (res < UINT16_MAX) {
+							bi.batteryManufacturerData.FirmwareVersion = OSSwapHostToBigInt16(res);
+						} else {
+							SYSLOG("acpib", "invalid supplement info for FirmwareVersion (%x)", res);
+							supplementConfig &= ~(1U << BISFirmwareVersion);
+						}
+					}
+					if (supplementConfig & (1U << BISHardwareVersion)) {
+						res = getNumberFromArray(extra, BISHardwareVersion);
+						if (res < UINT16_MAX) {
+							bi.batteryManufacturerData.HardwareVersion = OSSwapHostToBigInt16(res);
+						} else {
+							SYSLOG("acpib", "invalid supplement info for HardwareVersion (%x)", res);
+							supplementConfig &= ~(1U << BISHardwareVersion);
+						}
+					}
+					if (supplementConfig & (1U << BISBatteryVersion)) {
+						res = getNumberFromArray(extra, BISBatteryVersion);
+						if (res < UINT16_MAX) {
+							bi.batteryManufacturerData.BatteryVersion = OSSwapHostToBigInt16(res);
+						} else {
+							SYSLOG("acpib", "invalid supplement info for BatteryVersion (%x)", res);
+							supplementConfig &= ~(1U << BISBatteryVersion);
+						}
+					}
+					if (supplementConfig & (1U << BSSAverageRate)) {
+						averageRateAvailable = true;
+					}
+				}
+			}
+			supplement->release();
+		}
+	}
+	DBGLOG("acpib", "supplement config %x", supplementConfig);
+
 	bi.validateData(id);
 
 	if (!extended) {
@@ -124,6 +201,87 @@ bool ACPIBattery::updateRealTimeStatus(bool quickPoll) {
 	auto st = batteryInfo->state;
 	IOSimpleLockUnlock(batteryInfoLock);
 
+	if (supplementConfig > 0) {
+		OSObject *supplement = nullptr;
+		uint32_t res;
+		if (device->evaluateObject(AcpiBatteryStatusSup, &supplement) != kIOReturnSuccess) {
+			DBGLOG("acpib", "supplement status not available");
+		} else {
+			OSArray *extra = OSDynamicCast(OSArray, supplement);
+			if (extra) {
+				if (supplementConfig & (1U << BSSTemperature)) {
+					res = getNumberFromArray(extra, BSSTemperature - BISPackSize);
+					if (res < UINT16_MAX) {
+						st.temperatureRaw = res;
+						st.temperature = ((double) res - 2731) / 10;
+					} else {
+						SYSLOG("acpib", "invalid supplement info for Temperature (%u)", res);
+						supplementConfig &= ~(1U << BSSTemperature);
+					}
+				}
+				if (supplementConfig & (1U << BSSTimeToFull)) {
+					res = getNumberFromArray(extra, BSSTimeToFull - BISPackSize);
+					if (res <= UINT16_MAX) {
+						st.timeToFullHW = res;
+						DBGLOG("acpib", "TimeToFull (%u)", st.timeToFullHW);
+					} else {
+						SYSLOG("acpib", "invalid supplement info for TimeToFull (%u)", res);
+						supplementConfig &= ~(1U << BSSTimeToFull);
+					}
+				}
+				if (supplementConfig & (1U << BSSTimeToEmpty)) {
+					res = getNumberFromArray(extra, BSSTimeToEmpty - BISPackSize);
+					if (res <= UINT16_MAX) {
+						st.averageTimeToEmptyHW = res;
+						DBGLOG("acpib", "TimeToEmpty (%u)", st.averageTimeToEmptyHW);
+					} else {
+						SYSLOG("acpib", "invalid supplement info for TimeToEmpty (%u)", res);
+						supplementConfig &= ~(1U << BSSTimeToEmpty);
+					}
+				}
+				if (supplementConfig & (1U << BSSChargeLevel)) {
+					res = getNumberFromArray(extra, BSSChargeLevel - BISPackSize);
+					if (res <= 100) {
+						st.chargeLevel = res;
+						DBGLOG("acpib", "ChargeLevel (%u)", st.chargeLevel);
+					} else {
+						SYSLOG("acpib", "invalid supplement info for ChargeLevel (%u)", res);
+						supplementConfig &= ~(1U << BSSChargeLevel);
+					}
+				}
+				if (supplementConfig & (1U << BSSAverageRate)) {
+					res = getNumberFromArray(extra, BSSAverageRate - BISPackSize);
+					if (res <= UINT16_MAX) {
+						st.signedAverageRateHW = (int16_t) res;
+						DBGLOG("acpib", "AverageRate (%d)", st.signedAverageRateHW);
+					} else {
+						SYSLOG("acpib", "invalid supplement info for AverageRate (%d)", res);
+						supplementConfig &= ~(1U << BSSAverageRate);
+					}
+				}
+				if (supplementConfig & (1U << BSSChargingCurrent)) {
+					res = getNumberFromArray(extra, BSSChargingCurrent - BISPackSize);
+					if (res <= UINT16_MAX) {
+						st.chargingCurrent = res;
+					} else {
+						SYSLOG("acpib", "invalid supplement info for ChargingCurrent (%d)", res);
+						supplementConfig &= ~(1U << BSSChargingCurrent);
+					}
+				}
+				if (supplementConfig & (1U << BSSChargingVoltage)) {
+					res = getNumberFromArray(extra, BSSChargingVoltage - BISPackSize);
+					if (res <= UINT16_MAX) {
+						st.chargingVoltage = res;
+					} else {
+						SYSLOG("acpib", "invalid supplement info for ChargingVoltage (%d)", res);
+						supplementConfig &= ~(1U << BSSChargingVoltage);
+					}
+				}
+			}
+		}
+		supplement->release();
+	}
+
 	st.state = getNumberFromArray(status, BSTState);
 	st.presentRate = getNumberFromArray(status, BSTPresentRate);
 	st.remainingCapacity = getNumberFromArray(status, BSTRemainingCapacity);
@@ -140,27 +298,31 @@ bool ACPIBattery::updateRealTimeStatus(bool quickPoll) {
 		st.remainingCapacity = st.lastFullChargeCapacity;
 
 	// Average rate calculation
-	if (!st.presentRate || (st.presentRate == BatteryInfo::ValueUnknown)) {
-		auto delta = (st.remainingCapacity > st.lastRemainingCapacity ?
-					  st.remainingCapacity - st.lastRemainingCapacity :
-					  st.lastRemainingCapacity - st.remainingCapacity);
-		uint32_t interval = quickPoll ? 3600 / (QuickPollInterval / 1000) : 3600 / (NormalPollInterval / 1000);
-		st.presentRate = delta * interval;
-	}
-
-	if (!st.averageRate) {
-		st.averageRate = st.presentRate;
+	if (supplementConfig & (1U << BSSAverageRate)) {
+		st.averageRate = st.signedAverageRateHW < 0 ? -st.signedAverageRateHW : st.signedAverageRateHW;
 	} else {
-		st.averageRate += st.presentRate;
-		st.averageRate >>= 1;
-	}
+		if (!st.presentRate || (st.presentRate == BatteryInfo::ValueUnknown)) {
+			auto delta = (st.remainingCapacity > st.lastRemainingCapacity ?
+						  st.remainingCapacity - st.lastRemainingCapacity :
+						  st.lastRemainingCapacity - st.remainingCapacity);
+			uint32_t interval = quickPoll ? 3600 / (QuickPollInterval / 1000) : 3600 / (NormalPollInterval / 1000);
+			st.presentRate = delta * interval;
+		}
 
-	uint32_t highAverageBound = st.presentRate * (100 + AverageBoundPercent) / 100;
-	uint32_t lowAverageBound  = st.presentRate * (100 - AverageBoundPercent) / 100;
-	if (st.averageRate > highAverageBound)
-		st.averageRate = highAverageBound;
-	if (st.averageRate < lowAverageBound)
-		st.averageRate = lowAverageBound;
+		if (!st.averageRate) {
+			st.averageRate = st.presentRate;
+		} else {
+			st.averageRate += st.presentRate;
+			st.averageRate >>= 1;
+		}
+
+		uint32_t highAverageBound = st.presentRate * (100 + AverageBoundPercent) / 100;
+		uint32_t lowAverageBound  = st.presentRate * (100 - AverageBoundPercent) / 100;
+		if (st.averageRate > highAverageBound)
+			st.averageRate = highAverageBound;
+		if (st.averageRate < lowAverageBound)
+			st.averageRate = lowAverageBound;
+	}
 
 	// Remaining capacity
 	if (!st.remainingCapacity || st.remainingCapacity == BatteryInfo::ValueUnknown) {
@@ -168,7 +330,10 @@ bool ACPIBattery::updateRealTimeStatus(bool quickPoll) {
 		// Invalid or zero capacity is not allowed and will lead to boot failure, hack 1 here.
 		st.remainingCapacity = st.averageTimeToEmpty = st.runTimeToEmpty = 1;
 	} else {
-		st.averageTimeToEmpty = st.averageRate ? 60 * st.remainingCapacity / st.averageRate : 60 * st.remainingCapacity;
+		if (supplementConfig & (1U << BSSTimeToEmpty))
+			st.averageTimeToEmpty = st.averageTimeToEmptyHW;
+		else
+			st.averageTimeToEmpty = st.averageRate ? 60 * st.remainingCapacity / st.averageRate : 60 * st.remainingCapacity;
 		st.runTimeToEmpty = st.presentRate ? 60 * st.remainingCapacity / st.presentRate : 60 * st.remainingCapacity;
 	}
 
@@ -179,7 +344,7 @@ bool ACPIBattery::updateRealTimeStatus(bool quickPoll) {
 	// Check battery state
 	bool bogus = false;
 	switch (st.state & BSTStateMask) {
-		case BSTFullyCharged: {
+		case BSTNotCharging: {
 			if (!st.batteryIsFull) {
 				DBGLOG("acpib", "battery %d full, need stats update", id);
 				st.needUpdate = true;
@@ -188,6 +353,7 @@ bool ACPIBattery::updateRealTimeStatus(bool quickPoll) {
 			}
 			st.calculatedACAdapterConnected = true;
 			st.batteryIsFull = true;
+			st.chargingCurrent = 0;
 			st.timeToFull = 0;
 			st.signedPresentRate = st.presentRate;
 			st.signedAverageRate = st.averageRate;
@@ -202,6 +368,7 @@ bool ACPIBattery::updateRealTimeStatus(bool quickPoll) {
 			}
 			st.calculatedACAdapterConnected = false;
 			st.batteryIsFull = false;
+			st.chargingCurrent = 0;
 			st.timeToFull = 0;
 			st.signedPresentRate = -st.presentRate;
 			st.signedAverageRate = -st.averageRate;
@@ -211,8 +378,12 @@ bool ACPIBattery::updateRealTimeStatus(bool quickPoll) {
 			DBGLOG("acpib", "battery %d charging", id);
 			st.calculatedACAdapterConnected = true;
 			st.batteryIsFull = false;
-			int diff = st.remainingCapacity < st.lastFullChargeCapacity ? st.lastFullChargeCapacity - st.remainingCapacity : 0;
-			st.timeToFull = st.averageRate ? 60 * diff / st.averageRate : 60 * diff;
+			if (supplementConfig & (1U << BSSTimeToFull)) {
+				st.timeToFull = st.timeToFullHW;
+			} else {
+				int diff = st.remainingCapacity < st.lastFullChargeCapacity ? st.lastFullChargeCapacity - st.remainingCapacity : 0;
+				st.timeToFull = st.averageRate ? 60 * diff / st.averageRate : 60 * diff;
+			}
 			st.signedPresentRate = st.presentRate;
 			st.signedAverageRate = st.averageRate;
 			break;
@@ -313,8 +484,17 @@ uint16_t ACPIBattery::calculateBatteryStatus() {
 			value |= kBDischargingStatusBit;
 		if (st & BSTCritical)
 			value |= kBFullyDischargedStatusBit;
-		if ((st & BSTStateMask) == BSTFullyCharged)
-			value |= kBFullyChargedStatusBit | kBTerminateChargeAlarmBit;
+		if ((st & BSTStateMask) == BSTNotCharging) {
+			if (batteryInfo->state.lastFullChargeCapacity > 0 &&
+				batteryInfo->state.lastFullChargeCapacity != BatteryInfo::ValueUnknown &&
+				batteryInfo->state.lastFullChargeCapacity <= BatteryInfo::ValueMax &&
+				batteryInfo->state.remainingCapacity > 0 &&
+				batteryInfo->state.remainingCapacity != BatteryInfo::ValueUnknown &&
+				batteryInfo->state.remainingCapacity <= BatteryInfo::ValueMax &&
+				batteryInfo->state.remainingCapacity >= batteryInfo->state.lastFullChargeCapacity)
+				value |= kBFullyChargedStatusBit;
+			value |= kBTerminateChargeAlarmBit;
+		}
 
 		if (batteryInfo->state.bad) {
 			value |= kBTerminateChargeAlarmBit;
